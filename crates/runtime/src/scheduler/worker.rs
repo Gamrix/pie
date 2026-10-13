@@ -1627,7 +1627,7 @@ impl BatchScheduler {
                             stamp,
                             launch.process_id,
                             launch.logical_fire_id,
-                            launch.request.tokens(),
+                            launch.request.forward_rows(),
                             launch.wire_row_count(),
                             cohort,
                         );

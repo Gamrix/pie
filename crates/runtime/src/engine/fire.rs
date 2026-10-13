@@ -35,6 +35,15 @@ impl FireRequest {
         self.lanes.iter().map(|lane| lane.tokens.len()).sum()
     }
 
+    /// The token rows this request takes of a fire. A device-geometry decode
+    /// lane is posted with no host tokens, its one row resolved on the device,
+    /// so counting `tokens` alone lets a full prefill chunk co-batch with such
+    /// lanes past the forward budget the executor enforces.
+    #[must_use]
+    pub fn forward_rows(&self) -> usize {
+        self.lanes.iter().map(|lane| lane.tokens.len().max(1)).sum()
+    }
+
     pub fn pages(&self) -> impl Iterator<Item = u32> + '_ {
         self.lanes
             .iter()
