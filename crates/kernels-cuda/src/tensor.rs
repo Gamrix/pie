@@ -40,6 +40,26 @@ impl Tensor {
     pub const fn is_absent(&self) -> bool {
         self.ptr == 0
     }
+
+    /// `rows` rows starting at row `first`, over the same storage. A row of a
+    /// sub-byte dtype need not start on a byte, so only whole-byte rows slice.
+    #[must_use]
+    pub const fn rows_from(&self, first: u32, rows: u32) -> Tensor {
+        assert!(
+            self.dtype.bits() % 8 == 0,
+            "only whole-byte elements slice by row"
+        );
+        assert!(
+            first + rows <= self.rows,
+            "the slice stays inside the tensor"
+        );
+        Tensor::new(
+            self.ptr + first as u64 * self.width as u64 * self.dtype.bytes_ceil(),
+            rows,
+            self.width,
+            self.dtype,
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
