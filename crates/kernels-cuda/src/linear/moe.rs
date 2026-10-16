@@ -407,8 +407,31 @@ pub fn matmul_select(
     #[cfg(feature = "cuda")]
     {
         let fan = selected(OP, x, routes, y)?;
-        if let Some(count) = grouped_worth(ctx, x, bank, y, &fan, experts) {
-            return select_grouped(ctx, OP, x, bank, routes, y, count);
+        if let Some(plan) = grouped_worth(ctx, x, bank, y, &fan, experts) {
+            // Chunks run in stream order, so each reuses the one staging
+            // workspace the plan sized.
+            let mut first = 0;
+            while first < routes.rows {
+                let tokens = plan.tokens.min(routes.rows - first);
+                let top_k = routes.width;
+                let (first_route, chunk_routes) = (first * top_k, tokens * top_k);
+                let x_chunk = if fan.by_token {
+                    x.rows_from(first, tokens)
+                } else {
+                    x.rows_from(first_route, chunk_routes)
+                };
+                select_grouped(
+                    ctx,
+                    OP,
+                    x_chunk,
+                    bank,
+                    routes.rows_from(first, tokens),
+                    &mut y.rows_from(first_route, chunk_routes),
+                    plan.experts,
+                )?;
+                first += tokens;
+            }
+            return Ok(());
         }
     }
     select_gemv(ctx, OP, x, bank, routes, y, experts)
@@ -430,6 +453,14 @@ const fn block_rows(per_expert: u32) -> u32 {
 const GROUP_WORKSPACE_CAP: u64 = 512 << 20;
 
 #[cfg(feature = "cuda")]
+struct GroupPlan {
+    experts: u32,
+    // Tokens per grouped launch: the whole fire, or the widest chunk whose
+    // staging fits GROUP_WORKSPACE_CAP.
+    tokens: u32,
+}
+
+#[cfg(feature = "cuda")]
 fn grouped_worth(
     ctx: &Ctx,
     x: Tensor,
@@ -437,7 +468,7 @@ fn grouped_worth(
     y: &Tensor,
     fan: &Selected,
     experts: ExpertTable,
-) -> Option<u32> {
+) -> Option<GroupPlan> {
     if !ctx.tuning().moe_grouped {
         return None;
     }
@@ -454,17 +485,32 @@ fn grouped_worth(
     if u64::from(bank.width) != u64::from(x.width) * u64::from(y.width) {
         return None;
     }
-    let per_expert = fan.route_count.div_ceil(count);
-    if per_expert < ctx.tuning().moe_group_at {
-        return None;
+    let top_k = fan.top_k.unsigned_abs();
+    let tokens = fan.route_count / top_k;
+    // A fire whose staging overflows the cap is cut into equal token chunks,
+    // the fewest that fit, as long as each chunk still feeds every expert
+    // enough routes to beat the GEMV.
+    for chunks in 1..=tokens {
+        let chunk_tokens = tokens.div_ceil(chunks);
+        let chunk_routes = chunk_tokens * top_k;
+        let per_expert = chunk_routes.div_ceil(count);
+        if per_expert < ctx.tuning().moe_group_at {
+            return None;
+        }
+        let block = block_rows(per_expert);
+        let blocks = u64::from(count) + u64::from(chunk_routes.div_ceil(block));
+        let rows = blocks * u64::from(block);
+        let staged = rows
+            .checked_mul(u64::from(x.width) + u64::from(y.width))?
+            .checked_mul(x.dtype.bytes_ceil())?;
+        if staged <= GROUP_WORKSPACE_CAP {
+            return Some(GroupPlan {
+                experts: count,
+                tokens: chunk_tokens,
+            });
+        }
     }
-    let block = block_rows(per_expert);
-    let blocks = u64::from(count) + u64::from(fan.route_count.div_ceil(block));
-    let rows = blocks * u64::from(block);
-    let staged = rows
-        .checked_mul(u64::from(x.width) + u64::from(y.width))?
-        .checked_mul(x.dtype.bytes_ceil())?;
-    (staged <= GROUP_WORKSPACE_CAP).then_some(count)
+    None
 }
 
 #[cfg(feature = "cuda")]
@@ -681,16 +727,10 @@ pub(crate) fn select_gemv(
     let t = dtype_dispatch!(op, x.dtype, { Bf16 => "::pie::bf16", F16 => "::pie::f16" });
     debug_assert_eq!(bank.dtype, x.dtype, "the bank rides the activation's dtype");
     let fan = selected(op, x, routes, y)?;
-    if fan.route_count > MAX_GRID_Y {
-        return Err(refuse(
-            op,
-            format!(
-                "the route run is {}, above the {MAX_GRID_Y} rows this GEMV puts on the \
-                 grid's y axis; the aligned batched leg is what a wider fire wants",
-                fan.route_count
-            ),
-        ));
-    }
+    // One route per grid-y row; past MAX_GRID_Y the run folds onto z, and the
+    // kernel drops the overhang of the last slab against `route_count`.
+    let slabs = fan.route_count.div_ceil(MAX_GRID_Y).max(1);
+    let span = fan.route_count.div_ceil(slabs);
     if x.width == 0 || !x.width.is_multiple_of(VEC_WIDTH) {
         return Err(refuse(
             op,
@@ -712,7 +752,7 @@ pub(crate) fn select_gemv(
             )),
         )
         .apply(Launch::grid(
-            [y.width.div_ceil(GEMV_WARPS), fan.route_count, 1],
+            [y.width.div_ceil(GEMV_WARPS), span, slabs],
             [WARP, GEMV_WARPS, 1],
         )),
         &[
@@ -727,6 +767,7 @@ pub(crate) fn select_gemv(
             ArgValue::Ptr(experts.table),
             ArgValue::Ptr(experts.hits),
             ctx.stage(),
+            stated(op, fan.route_count)?.arg(),
         ],
     )
 }

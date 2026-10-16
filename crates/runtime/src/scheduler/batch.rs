@@ -32,7 +32,7 @@ pub(crate) fn request_capacity_usage(req: &PendingRequest, page_size: u32) -> Re
 
     RequestCapacityUsage {
         forward_requests,
-        forward_tokens: req.request.tokens(),
+        forward_tokens: req.request.forward_rows(),
         page_refs: req.request.pages().count(),
     }
 }
@@ -343,6 +343,27 @@ mod tests {
         two_seated_members_batch_into_a_fire_the_contract_accepts();
         a_device_geometry_member_seriates_into_the_suffix();
         a_frames_cells_are_one_per_member_and_never_shared();
+        a_hostless_device_lane_still_spends_a_row_of_the_budget();
+    }
+
+    fn a_hostless_device_lane_still_spends_a_row_of_the_budget() {
+        let chunk = FireRequest::one(crate::engine::fire::lane_of(0, vec![7; 64], 0, vec![3]));
+        let device_decode = FireRequest {
+            lanes: vec![::engine::Lane::default()],
+            geometry: GeometryClass::DeviceGeometry,
+            ..FireRequest::default()
+        };
+        let (frame, _) = build_frame_submission(
+            vec![vec![pending(chunk, 51), pending(device_decode, 52)]],
+            limits(),
+            16,
+            &SchedulerStats::default(),
+        );
+        assert_eq!(
+            frame.steps.len(),
+            2,
+            "a budget-wide chunk leaves no row for the device lane's one"
+        );
     }
 
     fn every_member_owns_a_span_of_the_steps_lanes() {

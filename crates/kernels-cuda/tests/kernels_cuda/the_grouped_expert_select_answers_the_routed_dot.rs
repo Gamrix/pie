@@ -129,6 +129,8 @@ fn the_grouped_expert_select_answers_the_routed_dot_every_case() {
     a_decode_width_fire_is_still_served();
     a_dominant_expert_still_fits_the_block_budget();
     a_ragged_expert_count_still_lands();
+    a_fire_past_the_staging_cap_is_cut_into_grouped_chunks();
+    a_gemv_fire_wider_than_grid_y_folds_onto_z();
 }
 
 fn the_token_read_leg_answers_the_dot() {
@@ -153,4 +155,17 @@ fn a_dominant_expert_still_fits_the_block_budget() {
 
 fn a_ragged_expert_count_still_lands() {
     check(48, 40, 3, 64, 96, true, Spread::Mixed);
+}
+
+// 20_000 routes of K = 16_384 stage ~690 MiB, past the grouped leg's 512 MiB
+// workspace, so the fire lands as two token chunks rather than on the GEMV.
+fn a_fire_past_the_staging_cap_is_cut_into_grouped_chunks() {
+    check(8, 2_500, 8, 16_384, 16, true, Spread::Mixed);
+}
+
+// 600 experts is past the grouped leg's 512, so 68_000 routes, more than grid
+// y's 65_535, all ride the GEMV, folded onto z.
+fn a_gemv_fire_wider_than_grid_y_folds_onto_z() {
+    check(600, 8_500, 8, 64, 32, true, Spread::Mixed);
+    check(600, 8_500, 8, 64, 32, false, Spread::Mixed);
 }

@@ -845,9 +845,13 @@ __device__ __forceinline__ void moe_matmul_select_gemv_body(
     int top_k, int K, int N, long long expert_stride,
     const T* const* __restrict__ expert_table,
     unsigned int* __restrict__ expert_hits,
-    const u32* __restrict__ win)
+    const u32* __restrict__ win,
+    int route_count)
 {
-    const int route = blockIdx.y;
+    // A route run wider than grid y's 65535 folds onto z; the last z slab
+    // can overhang the run, so its tail exits.
+    const int route = blockIdx.y + blockIdx.z * gridDim.y;
+    if (route >= route_count) return;
 
     if (win != nullptr && route >= static_cast<int>(win[0]) * top_k) return;
     const int plane_route = win != nullptr
@@ -925,11 +929,12 @@ __global__ void moe_matmul_select_gemv(
     T* __restrict__ out,
     int top_k, int K, int N, long long expert_stride,
     const T* const* __restrict__ expert_table,
-    unsigned int* __restrict__ expert_hits)
+    unsigned int* __restrict__ expert_hits,
+    int route_count)
 {
     moe_matmul_select_gemv_body<T, ActByToken, kWarps, kUnroll>(
         topk_idx, act, weight_base, out, top_k, K, N, expert_stride,
-        expert_table, expert_hits, nullptr);
+        expert_table, expert_hits, nullptr, route_count);
 }
 
 template <class T>
@@ -941,11 +946,12 @@ __global__ void moe_matmul_select_gemv_by_token(
     int top_k, int K, int N, long long expert_stride,
     const T* const* __restrict__ expert_table,
     unsigned int* __restrict__ expert_hits,
-    const u32* __restrict__ win)
+    const u32* __restrict__ win,
+    int route_count)
 {
     moe_matmul_select_gemv_body<T, true, kGemvWarps, 1>(
         topk_idx, act, weight_base, out, top_k, K, N, expert_stride,
-        expert_table, expert_hits, win);
+        expert_table, expert_hits, win, route_count);
 }
 
 template <class T>
@@ -957,11 +963,12 @@ __global__ void moe_matmul_select_gemv_by_route(
     int top_k, int K, int N, long long expert_stride,
     const T* const* __restrict__ expert_table,
     unsigned int* __restrict__ expert_hits,
-    const u32* __restrict__ win)
+    const u32* __restrict__ win,
+    int route_count)
 {
     moe_matmul_select_gemv_body<T, false, kGemvWarps, 1>(
         topk_idx, act, weight_base, out, top_k, K, N, expert_stride,
-        expert_table, expert_hits, win);
+        expert_table, expert_hits, win, route_count);
 }
 
 template <class T>
